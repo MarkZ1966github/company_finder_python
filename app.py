@@ -26,5 +26,13 @@ def search_company():
         return jsonify({'error': str(e)}), 500
 
 if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 8000))
-    app.run(debug=True, host='0.0.0.0', port=port)
+    # Try port 8000 first, fallback to 8080 if that fails
+    try:
+        port = int(os.environ.get('PORT', 8000))
+        app.run(debug=True, host='0.0.0.0', port=port)
+    except OSError as e:
+        if "Address already in use" in str(e):
+            print(f"Port {port} is in use, trying port 8080 instead")
+            app.run(debug=True, host='0.0.0.0', port=8080)
+        else:
+            raise e

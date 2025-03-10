@@ -33,14 +33,39 @@ class CompanyScraper:
         chrome_options.add_argument("--window-size=1920,1080")
         
         try:
-            self.driver = webdriver.Chrome(
-                service=Service(ChromeDriverManager().install()),
-                options=chrome_options
-            )
+            # Try to find an existing ChromeDriver in the cache
+            try:
+                # First try with ChromeDriverManager without version parameter
+                self.driver = webdriver.Chrome(
+                    service=Service(ChromeDriverManager().install()),
+                    options=chrome_options
+                )
+            except Exception as inner_e:
+                self.logger.warning(f"First ChromeDriver attempt failed: {inner_e}")
+                # Second attempt: Try with a direct path to ChromeDriver if it exists
+                try:
+                    import os
+                    home_dir = os.path.expanduser("~")
+                    driver_path = os.path.join(home_dir, ".wdm", "drivers", "chromedriver", "mac64", "latest", "chromedriver")
+                    if os.path.exists(driver_path):
+                        self.driver = webdriver.Chrome(
+                            service=Service(driver_path),
+                            options=chrome_options
+                        )
+                    else:
+                        # If no driver found, raise exception to trigger fallback
+                        raise Exception(f"ChromeDriver not found at {driver_path}")
+                except Exception as path_e:
+                    self.logger.warning(f"Direct path ChromeDriver attempt failed: {path_e}")
+                    # Third attempt: Try with a fixed version that we know works
+                    self.driver = webdriver.Chrome(options=chrome_options)
+            
             self.wait = WebDriverWait(self.driver, 10)  # 10 second wait
             self.logger.info("Chrome driver setup successfully")
         except Exception as e:
             self.logger.error(f"Error setting up Chrome driver: {e}")
+            # Fallback to requests-based scraping
+            self.logger.info("Falling back to requests-based scraping without browser")
             self.driver = None
     
     def scrape_company(self, company_name, website=None):
@@ -82,8 +107,31 @@ class CompanyScraper:
         try:
             if self.driver:
                 self.logger.info(f"Scraping website: {website}")
-                self.driver.get(website)
-                time.sleep(3)  # Wait for page to load
+                try:
+                    self.driver.get(website)
+                    time.sleep(3)  # Wait for page to load
+                except Exception as e:
+                    self.logger.error(f"Error navigating to {website}: {e}")
+                    # Fall back to requests
+                    self.logger.info(f"Falling back to requests for {website}")
+                    try:
+                        response = requests.get(website, timeout=10)
+                        if response.status_code == 200:
+                            soup = BeautifulSoup(response.text, 'html.parser')
+                            # Extract title
+                            if soup.title:
+                                data['title'] = soup.title.text.strip()
+                                self.logger.info(f"Found title via requests: {data['title']}")
+                            # Extract description
+                            meta_desc = soup.find('meta', attrs={'name': 'description'})
+                            if meta_desc and 'content' in meta_desc.attrs:
+                                data['description'] = meta_desc['content']
+                                self.logger.info(f"Found description via requests: {data['description'][:50]}..." if len(data['description']) > 50 else data['description'])
+                            return data
+                    except Exception as req_e:
+                        self.logger.error(f"Requests fallback also failed for {website}: {req_e}")
+                        return data
+
                 
                 # Extract company description
                 description_elements = self.driver.find_elements(By.XPATH, 
@@ -161,6 +209,66 @@ class CompanyScraper:
             # Try exact match first
             search_url = f"https://en.wikipedia.org/wiki/{company_name.replace(' ', '_')}"
             self.logger.info(f"Scraping Wikipedia: {search_url}")
+            
+            if self.driver:
+                try:
+                    self.driver.get(search_url)
+                    time.sleep(2)
+                except Exception as e:
+                    self.logger.error(f"Error navigating to Wikipedia: {e}")
+                    # Fall back to requests
+                    self.logger.info(f"Falling back to requests for Wikipedia")
+                    try:
+                        response = requests.get(search_url, timeout=10)
+                        if response.status_code == 200:
+                            soup = BeautifulSoup(response.text, 'html.parser')
+                            # Continue with normal processing using the soup object
+                            # Get company overview
+                            first_paragraph = soup.select_one('#mw-content-text p:not(.mw-empty-elt)')
+                            if first_paragraph:
+                                data['overview'] = first_paragraph.get_text().strip()
+                                self.logger.info(f"Found Wikipedia overview via requests: {data['overview'][:50]}..." if len(data['overview']) > 50 else data['overview'])
+                            
+                            # Get infobox data
+                            infobox = soup.select_one('.infobox')
+                            if infobox:
+                                # Process infobox data
+                                self.logger.info("Found infobox via requests")
+                                # Extract founded date
+                                founded = infobox.find(lambda tag: tag.name == 'th' and 'founded' in tag.get_text().lower())
+                                if founded and founded.find_next('td'):
+                                    data['founded'] = founded.find_next('td').get_text().strip()
+                                    self.logger.info(f"Found founding date: {data['founded']}")
+                                
+                                # Get headquarters
+                                hq = infobox.find(lambda tag: tag.name == 'th' and any(x in tag.get_text().lower() 
+                                                                                      for x in ['headquarters', 'location']))
+                                if hq and hq.find_next('td'):
+                                    data['headquarters'] = hq.find_next('td').get_text().strip()
+                                    self.logger.info(f"Found headquarters: {data['headquarters']}")
+                                
+                                # Get industry
+                                industry = infobox.find(lambda tag: tag.name == 'th' and 'industry' in tag.get_text().lower())
+                                if industry and industry.find_next('td'):
+                                    data['industry'] = industry.find_next('td').get_text().strip()
+                                    self.logger.info(f"Found industry: {data['industry']}")
+                                
+                                # Get number of employees
+                                employees = infobox.find(lambda tag: tag.name == 'th' and 'employees' in tag.get_text().lower())
+                                if employees and employees.find_next('td'):
+                                    data['employees'] = employees.find_next('td').get_text().strip()
+                                    self.logger.info(f"Found employee count: {data['employees']}")
+                                
+                                # Get revenue
+                                revenue = infobox.find(lambda tag: tag.name == 'th' and 'revenue' in tag.get_text().lower())
+                                if revenue and revenue.find_next('td'):
+                                    data['revenue'] = revenue.find_next('td').get_text().strip()
+                                    self.logger.info(f"Found revenue: {data['revenue']}")
+                            return data
+                    except Exception as req_e:
+                        self.logger.error(f"Requests fallback also failed for Wikipedia: {req_e}")
+                        return data
+
             
             if self.driver:
                 self.driver.get(search_url)
@@ -355,11 +463,57 @@ class CompanyScraper:
             self.logger.info(f"Scraping financial data from: {search_url}")
             
             if self.driver:
-                self.driver.get(search_url)
-                time.sleep(3)
-                
-                # Check if we got a valid page
-                if "Symbol not found" not in self.driver.page_source:
+                try:
+                    self.driver.get(search_url)
+                    time.sleep(3)
+                except Exception as e:
+                    self.logger.error(f"Error navigating to Yahoo Finance: {e}")
+                    # Fall back to requests
+                    self.logger.info(f"Falling back to requests for Yahoo Finance")
+                    try:
+                        headers = {
+                            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+                        }
+                        response = requests.get(search_url, headers=headers, timeout=10)
+                        if response.status_code == 200:
+                            soup = BeautifulSoup(response.text, 'html.parser')
+                            
+                            # Check if we got a valid page
+                            if "Symbol not found" not in response.text:
+                                # Get stock price
+                                try:
+                                    price_element = soup.select_one('[data-field="regularMarketPrice"]')
+                                    if price_element:
+                                        data['stock_price'] = price_element.get_text().strip()
+                                        self.logger.info(f"Found stock price via requests: {data['stock_price']}")
+                                except Exception as price_e:
+                                    self.logger.warning(f"Error getting stock price via requests: {price_e}")
+                                
+                                # Get market cap
+                                try:
+                                    market_cap = soup.find('td', string=lambda text: text and 'Market Cap' in text)
+                                    if market_cap and market_cap.find_next('td'):
+                                        data['market_cap'] = market_cap.find_next('td').get_text().strip()
+                                        self.logger.info(f"Found market cap via requests: {data['market_cap']}")
+                                except Exception as mc_e:
+                                    self.logger.warning(f"Error getting market cap via requests: {mc_e}")
+                                
+                                # Get P/E Ratio
+                                try:
+                                    pe_ratio = soup.find('td', string=lambda text: text and 'PE Ratio' in text)
+                                    if pe_ratio and pe_ratio.find_next('td'):
+                                        data['pe_ratio'] = pe_ratio.find_next('td').get_text().strip()
+                                        self.logger.info(f"Found P/E ratio via requests: {data['pe_ratio']}")
+                                except Exception as pe_e:
+                                    self.logger.warning(f"Error getting P/E ratio via requests: {pe_e}")
+                            else:
+                                self.logger.warning(f"Symbol not found for ticker via requests: {ticker}")
+                            return data
+                    except Exception as req_e:
+                        self.logger.error(f"Requests fallback also failed for Yahoo Finance: {req_e}")
+                        return data
+
+
                     soup = BeautifulSoup(self.driver.page_source, 'html.parser')
                     
                     # Get stock price
