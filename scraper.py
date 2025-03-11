@@ -6,10 +6,14 @@ from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from webdriver_manager.chrome import ChromeDriverManager
 import time
 import re
 import logging
+import os
+import platform
+
+# Import our custom ChromeDriver installer
+from chromedriver_installer import setup_chrome_driver
 
 # Configure logging
 logging.basicConfig(
@@ -33,40 +37,147 @@ class CompanyScraper:
         chrome_options.add_argument("--window-size=1920,1080")
         
         try:
-            # Try to find an existing ChromeDriver in the cache
-            try:
-                # First try with ChromeDriverManager without version parameter
-                self.driver = webdriver.Chrome(
-                    service=Service(ChromeDriverManager().install()),
-                    options=chrome_options
-                )
-            except Exception as inner_e:
-                self.logger.warning(f"First ChromeDriver attempt failed: {inner_e}")
-                # Second attempt: Try with a direct path to ChromeDriver if it exists
-                try:
-                    import os
-                    home_dir = os.path.expanduser("~")
-                    driver_path = os.path.join(home_dir, ".wdm", "drivers", "chromedriver", "mac64", "latest", "chromedriver")
-                    if os.path.exists(driver_path):
-                        self.driver = webdriver.Chrome(
-                            service=Service(driver_path),
-                            options=chrome_options
-                        )
-                    else:
-                        # If no driver found, raise exception to trigger fallback
-                        raise Exception(f"ChromeDriver not found at {driver_path}")
-                except Exception as path_e:
-                    self.logger.warning(f"Direct path ChromeDriver attempt failed: {path_e}")
-                    # Third attempt: Try with a fixed version that we know works
-                    self.driver = webdriver.Chrome(options=chrome_options)
+            # Check if Chrome is installed
+            import os
+            import platform
+            import subprocess
+            from shutil import which
             
-            self.wait = WebDriverWait(self.driver, 10)  # 10 second wait
-            self.logger.info("Chrome driver setup successfully")
+            chrome_installed = False
+            if platform.system() == "Darwin":  # macOS
+                chrome_paths = [
+                    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+                    os.path.expanduser("~/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
+                ]
+                for path in chrome_paths:
+                    if os.path.exists(path):
+                        chrome_installed = True
+                        self.logger.info(f"Chrome found at: {path}")
+                        break
+            elif platform.system() == "Windows":
+                chrome_paths = [
+                    os.path.join(os.environ.get('PROGRAMFILES', 'C:\\Program Files'), 'Google\\Chrome\\Application\\chrome.exe'),
+                    os.path.join(os.environ.get('PROGRAMFILES(X86)', 'C:\\Program Files (x86)'), 'Google\\Chrome\\Application\\chrome.exe')
+                ]
+                for path in chrome_paths:
+                    if os.path.exists(path):
+                        chrome_installed = True
+                        self.logger.info(f"Chrome found at: {path}")
+                        break
+            else:  # Linux and others
+                chrome_installed = which('google-chrome') is not None or which('chromium-browser') is not None
+                if chrome_installed:
+                    self.logger.info("Chrome found in PATH")
+            
+            if not chrome_installed:
+                self.logger.warning("Google Chrome not found on system. Browser automation will not be available.")
+                self.driver = None
+                return
+            
+            # Try multiple methods to setup ChromeDriver
+            methods = [
+                self._setup_with_webdriver_manager,
+                self._setup_with_cached_driver,
+                self._setup_with_chromedriver_binary,
+                self._setup_direct_chrome
+            ]
+            
+            for method in methods:
+                try:
+                    self.logger.info(f"Trying Chrome setup method: {method.__name__}")
+                    success = method(chrome_options)
+                    if success:
+                        self.wait = WebDriverWait(self.driver, 10)  # 10 second wait
+                        self.logger.info(f"Chrome driver setup successfully using {method.__name__}")
+                        return
+                except Exception as method_error:
+                    self.logger.warning(f"{method.__name__} failed: {method_error}")
+            
+            # If all methods failed
+            raise Exception("All ChromeDriver setup methods failed")
+            
         except Exception as e:
             self.logger.error(f"Error setting up Chrome driver: {e}")
             # Fallback to requests-based scraping
             self.logger.info("Falling back to requests-based scraping without browser")
             self.driver = None
+    
+    def _setup_with_webdriver_manager(self, chrome_options):
+        """Setup Chrome using webdriver-manager"""
+        try:
+            from webdriver_manager.chrome import ChromeDriverManager
+            # For Chrome 134, we need to specify compatible driver version
+            self.driver = webdriver.Chrome(
+                service=Service(ChromeDriverManager().install()),
+                options=chrome_options
+            )
+            return True
+        except Exception as e:
+            self.logger.warning(f"ChromeDriverManager setup failed: {e}")
+            return False
+    
+    def _setup_with_cached_driver(self, chrome_options):
+        """Setup Chrome using cached driver path"""
+        try:
+            import os
+            home_dir = os.path.expanduser("~")
+            # Check multiple possible paths for cached ChromeDriver
+            possible_paths = [
+                os.path.join(home_dir, ".wdm", "drivers", "chromedriver", "mac64", "latest", "chromedriver"),
+                os.path.join(home_dir, ".wdm", "drivers", "chromedriver", "mac_arm64", "latest", "chromedriver"),
+                os.path.join(home_dir, ".wdm", "drivers", "chromedriver", "mac64_m1", "latest", "chromedriver"),
+                os.path.join(home_dir, ".wdm", "drivers", "chromedriver", "win32", "latest", "chromedriver.exe"),
+                os.path.join(home_dir, ".wdm", "drivers", "chromedriver", "linux64", "latest", "chromedriver")
+            ]
+            
+            for driver_path in possible_paths:
+                if os.path.exists(driver_path):
+                    self.logger.info(f"Found cached ChromeDriver at: {driver_path}")
+                    self.driver = webdriver.Chrome(
+                        service=Service(driver_path),
+                        options=chrome_options
+                    )
+                    return True
+            
+            return False
+        except Exception as e:
+            self.logger.warning(f"Cached driver setup failed: {e}")
+            return False
+    
+    def _setup_with_chromedriver_binary(self, chrome_options):
+        """Setup Chrome using chromedriver-binary package if installed"""
+        try:
+            # Try chromedriver-binary-auto first (automatically detects Chrome version)
+            try:
+                import chromedriver_binary_auto
+                chromedriver_binary_auto.add_chromedriver_to_path()
+                self.logger.info("Using chromedriver-binary-auto package")
+                self.driver = webdriver.Chrome(options=chrome_options)
+                return True
+            except ImportError:
+                self.logger.info("chromedriver-binary-auto package not installed, trying chromedriver-binary")
+            
+            # Fall back to regular chromedriver-binary
+            import chromedriver_binary
+            self.logger.info("Using chromedriver-binary package")
+            self.driver = webdriver.Chrome(options=chrome_options)
+            return True
+        except ImportError:
+            self.logger.info("No chromedriver-binary packages installed")
+            return False
+        except Exception as e:
+            self.logger.warning(f"chromedriver-binary setup failed: {e}")
+            return False
+    
+    def _setup_direct_chrome(self, chrome_options):
+        """Try direct Chrome setup as last resort"""
+        try:
+            self.logger.info("Attempting direct Chrome setup")
+            self.driver = webdriver.Chrome(options=chrome_options)
+            return True
+        except Exception as e:
+            self.logger.warning(f"Direct Chrome setup failed: {e}")
+            return False
     
     def scrape_company(self, company_name, website=None):
         result = {
@@ -77,25 +188,153 @@ class CompanyScraper:
             'leadership': [],
             'news': [],
             'products': [],
-            'sources': {}
+            'sources': {},
+            'data_quality': {}
         }
         
-        # Try to scrape company website
+        # REQUIRE website for proper company identification
+        if not website:
+            self.logger.warning(f"No website provided for {company_name}. Results may be less accurate.")
+            result['warning'] = "No company website provided. Results may include generic information not specific to the company."
+            result['data_quality']['website_missing'] = True
+
+        # Try to scrape company website first - this is the primary source and REQUIRED for accurate data
+        company_verified = False
+        website_relevance_score = 0
+        
         if website:
             self.logger.info(f"Scraping company website: {website}")
             website_data = self.scrape_website(website)
             self.update_result(result, website_data, 'Company Website')
-        
-        # Try to scrape Wikipedia
-        self.logger.info(f"Scraping Wikipedia for: {company_name}")
-        wiki_data = self.scrape_wikipedia(company_name)
-        self.update_result(result, wiki_data, 'Wikipedia')
-        
-        # Try to scrape financial data
+            
+            # Verify we have relevant company data, not generic information
+            # If we have a company name, check if it appears in the website content
+            if website_data and ('title' in website_data or 'description' in website_data or 'about' in website_data):
+                website_content = (website_data.get('title', '') + ' ' + website_data.get('description', '') + ' ' + 
+                                  website_data.get('about', '')).lower()
+                
+                # For debugging
+                self.logger.info(f"Website content snippet: {website_content[:100]}...")
+                
+                # Stronger verification that this is a company website
+                company_indicators = ['company', 'corporation', 'inc', 'incorporated', 'llc', 'ltd', 'limited', 
+                                     'gmbh', 'ag', 'co', 'corp', 'about us', 'contact us', 'our team', 'careers',
+                                     'products', 'services', 'solutions', 'customers', 'clients']
+                
+                # Check if this looks like a company website
+                is_company_website = any(indicator in website_content for indicator in company_indicators)
+                if is_company_website:
+                    website_relevance_score += 2
+                    self.logger.info("Website appears to be a company website (found company indicators)")
+                
+                # If we have a company name, check if it appears in the website content
+                if company_name:
+                    company_name_parts = company_name.lower().split()
+                    significant_parts = [part for part in company_name_parts if len(part) > 2]
+                    
+                    # Check for full company name match
+                    if company_name.lower() in website_content:
+                        website_relevance_score += 3
+                        self.logger.info(f"Full company name '{company_name}' found in website content")
+                    
+                    # Check for partial matches
+                    company_matches = [part for part in significant_parts if part in website_content]
+                    if company_matches:
+                        website_relevance_score += len(company_matches)
+                        self.logger.info(f"Found {len(company_matches)} company name parts in website content: {company_matches}")
+                
+                # Domain name match with company name
+                if company_name:
+                    domain = website.replace('https://', '').replace('http://', '').replace('www.', '').split('.')[0].lower()
+                    if domain in company_name.lower() or any(part in domain for part in significant_parts):
+                        website_relevance_score += 2
+                        self.logger.info(f"Domain name '{domain}' matches company name parts")
+                
+                # Final relevance determination
+                if website_relevance_score >= 3:
+                    result['data_quality']['website_relevance'] = 'high'
+                    company_verified = True
+                    self.logger.info(f"Company website verified with score {website_relevance_score}")
+                elif website_relevance_score > 0:
+                    result['data_quality']['website_relevance'] = 'medium'
+                    company_verified = True
+                    self.logger.info(f"Company website partially verified with score {website_relevance_score}")
+                else:
+                    result['data_quality']['website_relevance'] = 'low'
+                    self.logger.warning(f"Company website could not be verified (score: {website_relevance_score})")
+        # Try to scrape Wikipedia - but only use if relevant to the company
         if company_name:
+            self.logger.info(f"Scraping Wikipedia for: {company_name}")
+            wiki_data = self.scrape_wikipedia(company_name)
+            
+            # Check if Wikipedia data appears to be about the company
+            if wiki_data and 'overview' in wiki_data:
+                wiki_overview = wiki_data['overview'].lower()
+                wiki_relevance_score = 0
+                
+                # For debugging
+                self.logger.info(f"Wikipedia overview snippet: {wiki_overview[:100]}...")
+                
+                # Check if this is about a company (look for company indicators)
+                company_indicators = ['company', 'corporation', 'inc', 'incorporated', 'llc', 'ltd', 'limited', 'gmbh', 'ag', 'co', 'corp', 
+                                     'founded', 'headquartered', 'business', 'industry', 'products', 'services']
+                company_indicator_matches = [indicator for indicator in company_indicators if indicator in wiki_overview]
+                is_company_article = len(company_indicator_matches) >= 1
+                
+                if is_company_article:
+                    wiki_relevance_score += len(company_indicator_matches)
+                    self.logger.info(f"Wikipedia article contains {len(company_indicator_matches)} company indicators")
+                
+                # Check for company name in overview
+                if company_name.lower() in wiki_overview:
+                    wiki_relevance_score += 3
+                    self.logger.info(f"Full company name '{company_name}' found in Wikipedia overview")
+                
+                # Check for partial name matches
+                company_name_parts = company_name.lower().split()
+                significant_parts = [part for part in company_name_parts if len(part) > 2]
+                company_matches = [part for part in significant_parts if part in wiki_overview]
+                
+                if company_matches:
+                    wiki_relevance_score += len(company_matches)
+                    self.logger.info(f"Found {len(company_matches)} company name parts in Wikipedia: {company_matches}")
+                
+                # Check for website domain match
+                if website:
+                    domain = website.replace('https://', '').replace('http://', '').replace('www.', '').split('.')[0].lower()
+                    if domain in wiki_overview:
+                        wiki_relevance_score += 2
+                        self.logger.info(f"Website domain '{domain}' found in Wikipedia content")
+                
+                # Final relevance determination
+                if wiki_relevance_score >= 4:
+                    self.logger.info(f"Wikipedia data appears highly relevant to {company_name} (score: {wiki_relevance_score})")
+                    self.update_result(result, wiki_data, 'Wikipedia')
+                    result['data_quality']['wikipedia_relevance'] = 'high'
+                elif wiki_relevance_score >= 2:
+                    self.logger.info(f"Wikipedia data appears somewhat relevant to {company_name} (score: {wiki_relevance_score})")
+                    self.update_result(result, wiki_data, 'Wikipedia')
+                    result['data_quality']['wikipedia_relevance'] = 'medium'
+                else:
+                    self.logger.warning(f"Wikipedia data does not appear relevant to {company_name} as a company (score: {wiki_relevance_score})")
+                    result['data_quality']['wikipedia_relevance'] = 'low'
+                    # Don't update result with potentially irrelevant data
+        # Try to scrape financial data - only if we have confirmed this is a company
+        # Try to scrape financial data - only if we have confirmed this is a company
+        if company_name and (company_verified or ('data_quality' in result and 
+                                            (result['data_quality'].get('wikipedia_relevance') == 'high' or 
+                                             result['data_quality'].get('wikipedia_relevance') == 'medium'))):
             self.logger.info(f"Scraping financial data for: {company_name}")
             finance_data = self.scrape_finance(company_name)
-            self.update_result(result, finance_data, 'Financial Data')
+            if finance_data:
+                self.update_result(result, finance_data, 'Financial Data')
+                result['data_quality']['financial_data'] = 'found'
+            else:
+                self.logger.warning(f"No financial data found for {company_name}")
+                result['data_quality']['financial_data'] = 'not_found'
+        elif company_name:
+            self.logger.warning(f"Skipping financial data for {company_name} as company identity could not be verified")
+            result['data_quality']['finance_skipped'] = 'Company identity not verified'
         
         return result
     
@@ -103,7 +342,9 @@ class CompanyScraper:
         if not website.startswith(('http://', 'https://')):
             website = f"https://{website}"
         
-        data = {}
+        data = {
+            'source_url': website  # Store the source URL to track where data came from
+        }
         try:
             if self.driver:
                 self.logger.info(f"Scraping website: {website}")
@@ -204,11 +445,19 @@ class CompanyScraper:
         return data
     
     def scrape_wikipedia(self, company_name):
-        data = {}
+        data = {
+            'source_url': f"https://en.wikipedia.org/wiki/{company_name.replace(' ', '_')}"  # Store source URL
+        }
         try:
+            # Add company to search terms to increase relevance
+            if not any(term in company_name.lower() for term in ['company', 'corporation', 'inc', 'incorporated', 'llc', 'ltd', 'limited']):
+                search_term = f"{company_name} company"
+                data['source_url'] = f"https://en.wikipedia.org/wiki/{search_term.replace(' ', '_')}"
+            
             # Try exact match first
-            search_url = f"https://en.wikipedia.org/wiki/{company_name.replace(' ', '_')}"
+            search_url = data['source_url']
             self.logger.info(f"Scraping Wikipedia: {search_url}")
+
             
             if self.driver:
                 try:
