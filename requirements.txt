@@ -6,3 +6,4 @@ selenium==4.8.2
 webdriver-manager==3.8.5
 gunicorn==20.1.0
 chromedriver-binary-auto==0.3.00
+GoogleNews==1.6.8

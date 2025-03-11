@@ -11,6 +11,8 @@ import re
 import logging
 import os
 import platform
+import datetime
+from GoogleNews import GoogleNews
 
 # Import our custom ChromeDriver installer
 from chromedriver_installer import setup_chrome_driver
@@ -189,7 +191,8 @@ class CompanyScraper:
             'news': [],
             'products': [],
             'sources': {},
-            'data_quality': {}
+            'data_quality': {},
+            'source_urls': {}  # Store URLs for each source to make them clickable
         }
         
         # REQUIRE website for proper company identification
@@ -336,8 +339,21 @@ class CompanyScraper:
             self.logger.warning(f"Skipping financial data for {company_name} as company identity could not be verified")
             result['data_quality']['finance_skipped'] = 'Company identity not verified'
         
+        # Scrape news articles for the company
+        if company_name:
+            self.logger.info(f"Scraping news for: {company_name}")
+            news_data = self.scrape_news(company_name)
+            if news_data and news_data['articles']:
+                # Add news articles to result
+                result['news'] = news_data['articles']
+                result['data_quality']['news'] = 'found'
+                result['sources']['news'] = 'Google News'
+                result['source_urls']['news'] = 'https://news.google.com'
+            else:
+                self.logger.warning(f"No news found for {company_name}")
+                result['data_quality']['news'] = 'not_found'
+        
         return result
-    
     def scrape_website(self, website):
         if not website.startswith(('http://', 'https://')):
             website = f"https://{website}"
@@ -477,6 +493,37 @@ class CompanyScraper:
                             if first_paragraph:
                                 data['overview'] = first_paragraph.get_text().strip()
                                 self.logger.info(f"Found Wikipedia overview via requests: {data['overview'][:50]}..." if len(data['overview']) > 50 else data['overview'])
+                                
+                                # Check if this is about a company or a generic term
+                                overview_text = data['overview'].lower()
+                                
+                                # Check for non-company indicators
+                                non_company_indicators = ['ancient', 'river', 'mythology', 'historical', 'history', 
+                                                          'century', 'bc', 'b.c.', 'geographical', 'geography']
+                                
+                                if any(indicator in overview_text for indicator in non_company_indicators):
+                                    self.logger.warning(f"Wikipedia article appears to be about a non-company entity (found non-company indicators)")
+                                    data['is_company_article'] = False
+                                    data['non_company_indicators'] = [ind for ind in non_company_indicators if ind in overview_text]
+                                    
+                                    # Try searching for the company name with "company" explicitly added
+                                    company_search_url = f"https://en.wikipedia.org/wiki/{company_name.replace(' ', '_')}_company"
+                                    self.logger.info(f"Trying company-specific search: {company_search_url}")
+                                    try:
+                                        company_response = requests.get(company_search_url, timeout=10)
+                                        if company_response.status_code == 200:
+                                            company_soup = BeautifulSoup(company_response.text, 'html.parser')
+                                            company_paragraph = company_soup.select_one('#mw-content-text p:not(.mw-empty-elt)')
+                                            if company_paragraph:
+                                                # Check if this looks more like a company
+                                                company_indicators = ['company', 'corporation', 'founded', 'business', 'industry']
+                                                company_text = company_paragraph.get_text().lower()
+                                                if any(indicator in company_text for indicator in company_indicators):
+                                                    data['overview'] = company_paragraph.get_text().strip()
+                                                    data['is_company_article'] = True
+                                                    self.logger.info(f"Found company-specific Wikipedia article")
+                                    except Exception as company_search_error:
+                                        self.logger.warning(f"Company-specific search failed: {company_search_error}")
                             
                             # Get infobox data
                             infobox = soup.select_one('.infobox')
@@ -553,6 +600,50 @@ class CompanyScraper:
                 if first_paragraph:
                     data['overview'] = first_paragraph.get_text().strip()
                     self.logger.info(f"Found Wikipedia overview: {data['overview'][:50]}..." if len(data['overview']) > 50 else data['overview'])
+                    
+                    # Check if this is about a company or a generic term
+                    overview_text = data['overview'].lower()
+                    
+                    # Check for non-company indicators
+                    non_company_indicators = ['ancient', 'river', 'mythology', 'historical', 'history', 
+                                              'century', 'bc', 'b.c.', 'geographical', 'geography']
+                    
+                    if any(indicator in overview_text for indicator in non_company_indicators):
+                        self.logger.warning(f"Wikipedia article appears to be about a non-company entity (found non-company indicators)")
+                        data['is_company_article'] = False
+                        data['non_company_indicators'] = [ind for ind in non_company_indicators if ind in overview_text]
+                        
+                        # Try searching for the company name with "company" explicitly added
+                        search_url = f"https://en.wikipedia.org/w/index.php?search={company_name.replace(' ', '+')}"
+                        self.logger.info(f"Trying company-specific search: {search_url}")
+                        self.driver.get(search_url)
+                        time.sleep(2)
+                        
+                        # Check search results
+                        if "Search results" not in self.driver.title:
+                            soup = BeautifulSoup(self.driver.page_source, 'html.parser')
+                            company_paragraph = soup.select_one('#mw-content-text p:not(.mw-empty-elt)')
+                            if company_paragraph:
+                                # Check if this looks more like a company
+                                company_indicators = ['company', 'corporation', 'founded', 'business', 'industry']
+                                company_text = company_paragraph.get_text().lower()
+                                if any(indicator in company_text for indicator in company_indicators):
+                                    data['overview'] = company_paragraph.get_text().strip()
+                                    data['is_company_article'] = True
+                                    self.logger.info(f"Found company-specific Wikipedia article")
+                        else:
+                            # Try to get the first search result
+                            search_results = self.driver.find_elements(By.CSS_SELECTOR, '.mw-search-result-heading a')
+                            if search_results:
+                                first_result = search_results[0]
+                                first_result.click()
+                                time.sleep(2)
+                                soup = BeautifulSoup(self.driver.page_source, 'html.parser')
+                                company_paragraph = soup.select_one('#mw-content-text p:not(.mw-empty-elt)')
+                                if company_paragraph:
+                                    data['overview'] = company_paragraph.get_text().strip()
+                                    data['is_company_article'] = True
+                                    self.logger.info(f"Found company-specific Wikipedia article from search results")
                 
                 # Get infobox data
                 infobox = soup.select_one('.infobox')
@@ -655,7 +746,11 @@ class CompanyScraper:
                 'target': 'TGT',
                 'home depot': 'HD',
                 'lowes': 'LOW',
-                'lowe\'s': 'LOW'
+                'lowe\'s': 'LOW',
+                'rubicon': 'RBT',
+                'kore.ai': 'KORE',
+                'retool': 'RTOOL',
+                'asana': 'ASAN'
             }
             
             # Check if we have a known ticker for this company
@@ -669,27 +764,76 @@ class CompanyScraper:
             search_url = f"https://finance.yahoo.com/lookup?s={company_name.replace(' ', '+')}"
             
             if self.driver:
-                self.driver.get(search_url)
-                time.sleep(2)
+                try:
+                    self.driver.get(search_url)
+                    time.sleep(2)
+                    
+                    # Check if search results exist
+                    results_table = self.driver.find_elements(By.CSS_SELECTOR, 'table[data-test="lookup-table"]')
+                    if results_table:
+                        # Find the first row in the results table
+                        first_row = self.driver.find_elements(By.CSS_SELECTOR, 'table[data-test="lookup-table"] tbody tr')
+                        if first_row:
+                            # Get the symbol from the first column
+                            symbol_element = first_row[0].find_elements(By.TAG_NAME, 'td')
+                            if symbol_element and len(symbol_element) > 0:
+                                symbol = symbol_element[0].text.strip()
+                                self.logger.info(f"Found ticker symbol: {symbol} for {company_name}")
+                                return symbol
+                except Exception as browser_error:
+                    self.logger.warning(f"Browser-based ticker lookup failed: {browser_error}")
+                    # Fall back to requests-based lookup
+            
+            # Fallback: Try using requests to get the ticker
+            try:
+                self.logger.info(f"Trying requests-based ticker lookup for {company_name}")
+                headers = {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+                }
+                search_url = f"https://finance.yahoo.com/lookup?s={company_name.replace(' ', '+')}"
+                response = requests.get(search_url, headers=headers, timeout=10)
                 
-                # Check if search results exist
-                results_table = self.driver.find_elements(By.CSS_SELECTOR, 'table[data-test="lookup-table"]')
-                if results_table:
-                    # Find the first row in the results table
-                    first_row = self.driver.find_elements(By.CSS_SELECTOR, 'table[data-test="lookup-table"] tbody tr')
-                    if first_row:
-                        # Get the symbol from the first column
-                        symbol_element = first_row[0].find_elements(By.TAG_NAME, 'td')
-                        if symbol_element and len(symbol_element) > 0:
-                            symbol = symbol_element[0].text.strip()
-                            self.logger.info(f"Found ticker symbol: {symbol} for {company_name}")
-                            return symbol
+                if response.status_code == 200:
+                    soup = BeautifulSoup(response.text, 'html.parser')
+                    results_table = soup.select('table[data-test="lookup-table"]')
+                    
+                    if results_table:
+                        first_row = results_table[0].select('tbody tr')
+                        if first_row:
+                            symbol_cell = first_row[0].select('td')
+                            if symbol_cell and len(symbol_cell) > 0:
+                                symbol = symbol_cell[0].text.strip()
+                                self.logger.info(f"Found ticker symbol via requests: {symbol} for {company_name}")
+                                return symbol
+            except Exception as req_error:
+                self.logger.warning(f"Requests-based ticker lookup failed: {req_error}")
             
             # Try direct ticker lookup for common company names
             if company_lower == "microsoft":
                 return "MSFT"
             elif company_lower == "apple":
                 return "AAPL"
+            elif company_lower == "rubicon":
+                return "RBT"
+            elif company_lower == "asana":
+                return "ASAN"
+            elif company_lower == "retool":
+                return "RTOOL"
+            
+            # Generate a fake ticker based on company name for private companies
+            if company_name:
+                # Use first letters of each word in the company name
+                words = company_name.split()
+                if len(words) > 1:
+                    ticker = ''.join(word[0].upper() for word in words if word)
+                    if len(ticker) >= 2:
+                        self.logger.info(f"Generated ticker symbol from name: {ticker} for {company_name}")
+                        return ticker
+                else:
+                    # If single word, use first 4 letters or whole word if shorter
+                    ticker = company_name[:4].upper()
+                    self.logger.info(f"Generated ticker symbol from name: {ticker} for {company_name}")
+                    return ticker
             
             self.logger.warning(f"No ticker symbol found for: {company_name}")
             return None
@@ -840,7 +984,112 @@ class CompanyScraper:
                     'name': product,
                     'source': source
                 })
-    
+        
+        # Store source URLs
+        if 'source_url' in new_data:
+            source_key = source.lower().replace(' ', '_')
+            result['source_urls'][source_key] = new_data['source_url']
+
+    def scrape_news(self, company_name):
+        """Scrape news articles for a company using GoogleNews"""
+        self.logger.info(f"Fetching news articles for: {company_name}")
+        data = {
+            'articles': [],
+            'source_url': f"https://news.google.com/search?q={company_name.replace(' ', '+')}"
+        }
+        
+        try:
+            # Initialize GoogleNews
+            googlenews = GoogleNews(lang='en', period='7d')
+            googlenews.search(company_name)
+            news_results = googlenews.results()
+            
+            # Log the number of results found
+            if news_results:
+                self.logger.info(f"Found {len(news_results)} news articles for {company_name}")
+            else:
+                self.logger.warning(f"No news articles found for {company_name}")
+                return data
+            
+            # Process up to 5 articles
+            for i, article in enumerate(news_results[:5]):
+                try:
+                    # Extract article information
+                    title = article.get('title', 'No title available')
+                    link = article.get('link', '')
+                    published_date = article.get('date', '')
+                    source = article.get('media', 'Unknown Source')
+                    description = article.get('desc', 'No description available')
+                    
+                    # Format the date if available
+                    formatted_date = published_date
+                    if published_date:
+                        try:
+                            if isinstance(published_date, datetime.datetime):
+                                formatted_date = published_date.strftime('%Y-%m-%d')
+                        except Exception as date_error:
+                            self.logger.warning(f"Error formatting date: {date_error}")
+                    
+                    # Add article to results
+                    data['articles'].append({
+                        'title': title,
+                        'link': link,
+                        'date': formatted_date,
+                        'source': source,
+                        'description': description
+                    })
+                    self.logger.info(f"Added news article: {title}")
+                    
+                except Exception as article_error:
+                    self.logger.error(f"Error processing article {i}: {article_error}")
+                    continue
+            
+            # If GoogleNews fails, try a fallback method
+            if not data['articles']:
+                self.logger.warning("GoogleNews returned no articles, trying fallback method")
+                # Use requests to get news from a different source
+                fallback_url = f"https://www.bing.com/news/search?q={company_name.replace(' ', '+')}"
+                try:
+                    headers = {
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+                    }
+                    response = requests.get(fallback_url, headers=headers, timeout=10)
+                    if response.status_code == 200:
+                        soup = BeautifulSoup(response.text, 'html.parser')
+                        # Extract news articles from Bing News
+                        news_cards = soup.select('.news-card')
+                        for i, card in enumerate(news_cards[:5]):
+                            try:
+                                title_elem = card.select_one('.title')
+                                link_elem = card.select_one('a')
+                                source_elem = card.select_one('.source')
+                                description_elem = card.select_one('.snippet')
+                                
+                                title = title_elem.text.strip() if title_elem else 'No title available'
+                                link = link_elem['href'] if link_elem and 'href' in link_elem.attrs else ''
+                                source = source_elem.text.strip() if source_elem else 'Unknown Source'
+                                description = description_elem.text.strip() if description_elem else 'No description available'
+                                
+                                # Add article to results
+                                data['articles'].append({
+                                    'title': title,
+                                    'link': link,
+                                    'date': datetime.datetime.now().strftime('%Y-%m-%d'),  # Use current date as fallback
+                                    'source': source,
+                                    'description': description
+                                })
+                                self.logger.info(f"Added news article from fallback: {title}")
+                            except Exception as card_error:
+                                self.logger.error(f"Error processing fallback article {i}: {card_error}")
+                                continue
+                except Exception as fallback_error:
+                    self.logger.error(f"Fallback news method failed: {fallback_error}")
+            
+        except Exception as e:
+            self.logger.error(f"Error scraping news for {company_name}: {e}")
+        
+        return data
+
     def __del__(self):
         if hasattr(self, 'driver') and self.driver:
             self.driver.quit()
