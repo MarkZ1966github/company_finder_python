@@ -315,8 +315,19 @@
                     data.overview.founded || 'Not available';
                 document.getElementById('company-headquarters').textContent = 
                     data.overview.headquarters || 'Not available';
-                document.getElementById('company-industry').textContent = 
-                    data.overview.industry || 'Not available';
+                // Format industry with commas for better readability
+                if (data.overview.industry) {
+                    // Add spaces after industry names if they're run together
+                    let formattedIndustry = data.overview.industry
+                        .replace(/([a-z])([A-Z])/g, '$1, $2')  // Add comma between camelCase words
+                        .replace(/([a-zA-Z])([0-9])/g, '$1, $2')  // Add comma between letters and numbers
+                        .replace(/([0-9])([a-zA-Z])/g, '$1, $2');  // Add comma between numbers and letters
+                    
+                    document.getElementById('company-industry').textContent = formattedIndustry;
+                } else {
+                    document.getElementById('company-industry').textContent = 'Not available';
+                }
+
                 
                 // Make website clickable
                 const websiteElement = document.getElementById('company-website');
