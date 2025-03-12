@@ -37,6 +37,13 @@ class CompanyScraper:
         chrome_options.add_argument("--disable-dev-shm-usage")
         chrome_options.add_argument("--disable-gpu")
         chrome_options.add_argument("--window-size=1920,1080")
+        # Add additional options to improve stability
+        chrome_options.add_argument("--disable-extensions")
+        chrome_options.add_argument("--disable-browser-side-navigation")
+        chrome_options.add_argument("--disable-infobars")
+        chrome_options.add_argument("--disable-setuid-sandbox")
+        chrome_options.add_argument("--disable-features=IsolateOrigins,site-per-process")
+        chrome_options.add_argument("--ignore-certificate-errors")
         
         try:
             # Check if Chrome is installed
@@ -108,11 +115,13 @@ class CompanyScraper:
         """Setup Chrome using webdriver-manager"""
         try:
             from webdriver_manager.chrome import ChromeDriverManager
-            # For Chrome 134, we need to specify compatible driver version
+            # Don't specify version - let ChromeDriverManager find the compatible version
             self.driver = webdriver.Chrome(
                 service=Service(ChromeDriverManager().install()),
                 options=chrome_options
             )
+            # Verify driver is working with a simple operation
+            self.driver.get('about:blank')
             return True
         except Exception as e:
             self.logger.warning(f"ChromeDriverManager setup failed: {e}")
@@ -365,10 +374,20 @@ class CompanyScraper:
             if self.driver:
                 self.logger.info(f"Scraping website: {website}")
                 try:
+                    # Check if driver is still valid and restart if needed
+                    try:
+                        self.driver.current_url  # Test if session is valid
+                    except Exception as session_error:
+                        self.logger.warning(f"Chrome driver session invalid, restarting: {session_error}")
+                        self.setup_browser()  # Recreate the browser session
+                    
+                    # Now try to navigate to the website
                     self.driver.get(website)
                     time.sleep(3)  # Wait for page to load
                 except Exception as e:
                     self.logger.error(f"Error navigating to {website}: {e}")
+                    # Fall back to requests
+                    self.logger.info(f"Falling back to requests for {website}")
                     # Fall back to requests
                     self.logger.info(f"Falling back to requests for {website}")
                     try:
@@ -454,7 +473,233 @@ class CompanyScraper:
                 if products:
                     data['products'] = products[:5]  # Limit to 5 products
                     self.logger.info(f"Found {len(products)} products/services")
-        
+
+                # Try to find leadership information
+                data['leadership'] = []  # Initialize leadership array
+                leadership_keywords = ['leadership', 'management', 'team', 'executives', 'founders']
+                
+                # Look for leadership sections
+                leadership_section = soup.find(id=lambda i: i and any(keyword in i.lower() for keyword in leadership_keywords))
+                if not leadership_section:
+                    leadership_section = soup.find(class_=lambda c: c and any(keyword in c.lower() for keyword in leadership_keywords))
+                
+                if leadership_section:
+                    # Try to find leadership elements - often in headings followed by descriptions
+                    for name_elem in leadership_section.find_all(['h3', 'h4', 'h5', 'strong', 'b']):
+                        name = name_elem.get_text().strip()
+                        position_elem = name_elem.find_next(['p', 'div', 'span'])
+                        position = position_elem.get_text().strip() if position_elem else 'Leadership'
+                        
+                        if name and len(name) < 50:  # Reasonable length for a name
+                            data['leadership'].append({
+                                'name': name,
+                                'position': position
+                            })
+                            self.logger.info(f"Found leader from website: {name} ({position})")
+                # Try to find leadership information
+                data['leadership'] = []  # Initialize leadership array
+                leadership_keywords = ['leadership', 'management', 'team', 'executives', 'founders', 'board', 'directors']
+                
+                # Look for leadership sections
+                leadership_section = soup.find(id=lambda i: i and any(keyword in i.lower() for keyword in leadership_keywords))
+                if not leadership_section:
+                    leadership_section = soup.find(class_=lambda c: c and any(keyword in c.lower() for keyword in leadership_keywords))
+                
+                # Try by content
+                if not leadership_section:
+                    leadership_section = soup.find(lambda tag: tag.name and tag.name.lower() in ['h1', 'h2', 'h3', 'h4'] and 
+                                                  any(word in tag.get_text().lower() for word in leadership_keywords))
+                    if leadership_section:
+                        # Get the next sibling elements that might contain the team info
+                        leadership_section = leadership_section.find_next(['div', 'section', 'ul'])
+                
+                if leadership_section:
+                    # Try to find leadership elements - often in headings followed by descriptions
+                    leaders = []
+                    
+                    # Look for common leadership patterns
+                    # Pattern 1: h3/h4 with name followed by position in p or div
+                    for name_elem in leadership_section.find_all(['h3', 'h4', 'h5', 'strong', 'b']):
+                        name = name_elem.get_text().strip()
+                        position_elem = name_elem.find_next(['p', 'div', 'span'])
+                        position = position_elem.get_text().strip() if position_elem else 'Leadership'
+                        
+                        if name and len(name) < 50:  # Reasonable length for a name
+                            data['leadership'].append({
+                                'name': name,
+                                'position': position
+                            })
+                            self.logger.info(f"Found leader from website: {name} ({position})")
+                    
+                    # If no leaders found, try other common patterns
+                    if not data['leadership']:
+                        # Look for list items that might contain leadership info
+                        for item in leadership_section.find_all('li'):
+                            text = item.get_text().strip()
+                            # Try to separate name and position
+                            if ',' in text or '-' in text or '–' in text:
+                                parts = re.split('[,\-–]', text, 1)
+                                if len(parts) >= 2:
+                                    name = parts[0].strip()
+                                    position = parts[1].strip()
+                                    data['leadership'].append({
+                                        'name': name,
+                                        'position': position
+                                    })
+                                    self.logger.info(f"Found leader from list: {name} ({position})")
+                    
+                    # If still no leaders found, try looking for structured data
+                    if not data['leadership']:
+                        for card in leadership_section.find_all(['div', 'article', 'section']):
+                            # Look for name and position within the card
+                            name_elem = card.find(['h3', 'h4', 'h5', 'strong', 'b'])
+                            if name_elem:
+                                name = name_elem.get_text().strip()
+                                position_elem = card.find(['p', 'div', 'span'])
+                                position = position_elem.get_text().strip() if position_elem else 'Leadership'
+                                
+                                if name and len(name) < 50 and name != position:  # Avoid duplicates
+                                    data['leadership'].append({
+                                        'name': name,
+                                        'position': position
+                                    })
+                                    self.logger.info(f"Found leader from card: {name} ({position})")
+                # Try to find leadership information
+                data['leadership'] = []  # Initialize leadership array
+                leadership_keywords = ['leadership', 'management', 'team', 'executives', 'founders', 'board', 'directors']
+                
+                # Look for leadership sections
+                leadership_section = soup.find(id=lambda i: i and any(keyword in i.lower() for keyword in leadership_keywords))
+                if not leadership_section:
+                    leadership_section = soup.find(class_=lambda c: c and any(keyword in c.lower() for keyword in leadership_keywords))
+                
+                # Try by content
+                if not leadership_section:
+                    leadership_section = soup.find(lambda tag: tag.name and tag.name.lower() in ['h1', 'h2', 'h3', 'h4'] and 
+                                                  any(word in tag.get_text().lower() for word in leadership_keywords))
+                    if leadership_section:
+                        # Get the next sibling elements that might contain the team info
+                        leadership_section = leadership_section.find_next(['div', 'section', 'ul'])
+                
+                if leadership_section:
+                    # Try to find leadership elements - often in headings followed by descriptions
+                    leaders = []
+                    
+                    # Look for common leadership patterns
+                    # Pattern 1: h3/h4 with name followed by position in p or div
+                    for name_elem in leadership_section.find_all(['h3', 'h4', 'h5', 'strong', 'b']):
+                        name = name_elem.get_text().strip()
+                        position_elem = name_elem.find_next(['p', 'div', 'span'])
+                        position = position_elem.get_text().strip() if position_elem else 'Leadership'
+                        
+                        if name and len(name) < 50:  # Reasonable length for a name
+                            data['leadership'].append({
+                                'name': name,
+                                'position': position
+                            })
+                            self.logger.info(f"Found leader from website: {name} ({position})")
+                    
+                    # If no leaders found, try other common patterns
+                    if not data['leadership']:
+                        # Look for list items that might contain leadership info
+                        for item in leadership_section.find_all('li'):
+                            text = item.get_text().strip()
+                            # Try to separate name and position
+                            if ',' in text or '-' in text or '–' in text:
+                                parts = re.split('[,\-–]', text, 1)
+                                if len(parts) >= 2:
+                                    name = parts[0].strip()
+                                    position = parts[1].strip()
+                                    data['leadership'].append({
+                                        'name': name,
+                                        'position': position
+                                    })
+                                    self.logger.info(f"Found leader from list: {name} ({position})")
+                    
+                    # If still no leaders found, try looking for structured data
+                    if not data['leadership']:
+                        for card in leadership_section.find_all(['div', 'article', 'section']):
+                            # Look for name and position within the card
+                            name_elem = card.find(['h3', 'h4', 'h5', 'strong', 'b'])
+                            if name_elem:
+                                name = name_elem.get_text().strip()
+                                position_elem = card.find(['p', 'div', 'span'])
+                                position = position_elem.get_text().strip() if position_elem else 'Leadership'
+                                
+                                if name and len(name) < 50 and name != position:  # Avoid duplicates
+                                    data['leadership'].append({
+                                        'name': name,
+                                        'position': position
+                                    })
+                                    self.logger.info(f"Found leader from card: {name} ({position})")
+                # Try to find leadership information
+                data['leadership'] = []  # Initialize leadership array
+                leadership_keywords = ['leadership', 'management', 'team', 'executives', 'founders', 'board', 'directors']
+                
+                # Look for leadership sections
+                leadership_section = soup.find(id=lambda i: i and any(keyword in i.lower() for keyword in leadership_keywords))
+                if not leadership_section:
+                    leadership_section = soup.find(class_=lambda c: c and any(keyword in c.lower() for keyword in leadership_keywords))
+                
+                # Try by content
+                if not leadership_section:
+                    leadership_section = soup.find(lambda tag: tag.name and tag.name.lower() in ['h1', 'h2', 'h3', 'h4'] and 
+                                                  any(word in tag.get_text().lower() for word in leadership_keywords))
+                    if leadership_section:
+                        # Get the next sibling elements that might contain the team info
+                        leadership_section = leadership_section.find_next(['div', 'section', 'ul'])
+                
+                if leadership_section:
+                    # Try to find leadership elements - often in headings followed by descriptions
+                    leaders = []
+                    
+                    # Look for common leadership patterns
+                    # Pattern 1: h3/h4 with name followed by position in p or div
+                    for name_elem in leadership_section.find_all(['h3', 'h4', 'h5', 'strong', 'b']):
+                        name = name_elem.get_text().strip()
+                        position_elem = name_elem.find_next(['p', 'div', 'span'])
+                        position = position_elem.get_text().strip() if position_elem else 'Leadership'
+                        
+                        if name and len(name) < 50:  # Reasonable length for a name
+                            data['leadership'].append({
+                                'name': name,
+                                'position': position
+                            })
+                            self.logger.info(f"Found leader from website: {name} ({position})")
+                    
+                    # If no leaders found, try other common patterns
+                    if not data['leadership']:
+                        # Look for list items that might contain leadership info
+                        for item in leadership_section.find_all('li'):
+                            text = item.get_text().strip()
+                            # Try to separate name and position
+                            if ',' in text or '-' in text or '–' in text:
+                                parts = re.split('[,\-–]', text, 1)
+                                if len(parts) >= 2:
+                                    name = parts[0].strip()
+                                    position = parts[1].strip()
+                                    data['leadership'].append({
+                                        'name': name,
+                                        'position': position
+                                    })
+                                    self.logger.info(f"Found leader from list: {name} ({position})")
+                    
+                    # If still no leaders found, try looking for structured data
+                    if not data['leadership']:
+                        for card in leadership_section.find_all(['div', 'article', 'section']):
+                            # Look for name and position within the card
+                            name_elem = card.find(['h3', 'h4', 'h5', 'strong', 'b'])
+                            if name_elem:
+                                name = name_elem.get_text().strip()
+                                position_elem = card.find(['p', 'div', 'span'])
+                                position = position_elem.get_text().strip() if position_elem else 'Leadership'
+                                
+                                if name and len(name) < 50 and name != position:  # Avoid duplicates
+                                    data['leadership'].append({
+                                        'name': name,
+                                        'position': position
+                                    })
+                                    self.logger.info(f"Found leader from card: {name} ({position})")
         except Exception as e:
             self.logger.error(f"Error scraping website {website}: {e}")
         
@@ -477,6 +722,14 @@ class CompanyScraper:
             
             if self.driver:
                 try:
+                    # Check if driver is still valid and restart if needed
+                    try:
+                        self.driver.current_url  # Test if session is valid
+                    except Exception as session_error:
+                        self.logger.warning(f"Chrome driver session invalid, restarting: {session_error}")
+                        self.setup_browser()  # Recreate the browser session
+                    
+                    # Now try to navigate to Wikipedia
                     self.driver.get(search_url)
                     time.sleep(2)
                 except Exception as e:
@@ -678,6 +931,29 @@ class CompanyScraper:
                     if revenue and revenue.find_next('td'):
                         data['revenue'] = revenue.find_next('td').get_text().strip()
                         self.logger.info(f"Found revenue: {data['revenue']}")
+                    
+                    # Get leadership information
+                    leadership_keys = ['founder', 'ceo', 'key people', 'key person', 'chairman', 'president', 'directors']
+                    for key in leadership_keys:
+                        leader_row = infobox.find(lambda tag: tag.name == 'th' and key in tag.get_text().lower())
+                        if leader_row and leader_row.find_next('td'):
+                            leader_text = leader_row.find_next('td').get_text().strip()
+                            position = leader_row.get_text().strip()
+                            # Split if there are multiple people
+                            if ',' in leader_text or '\n' in leader_text:
+                                leaders = [l.strip() for l in re.split('[,\\n]', leader_text) if l.strip()]
+                                for leader in leaders:
+                                    data['leadership'].append({
+                                        'name': leader,
+                                        'position': position
+                                    })
+                                    self.logger.info(f"Found leader: {leader} ({position})")
+                            else:
+                                data['leadership'].append({
+                                    'name': leader_text,
+                                    'position': position
+                                })
+                                self.logger.info(f"Found leader: {leader_text} ({position})")
         
         except Exception as e:
             self.logger.error(f"Error scraping Wikipedia for {company_name}: {e}")
@@ -689,9 +965,16 @@ class CompanyScraper:
         try:
             self.logger.info(f"Looking up ticker symbol for: {company_name}")
             
+            # Check if driver is still valid and restart if needed
+            if self.driver:
+                try:
+                    self.driver.current_url  # Test if session is valid
+                except Exception as session_error:
+                    self.logger.warning(f"Chrome driver session invalid, restarting: {session_error}")
+                    self.setup_browser()  # Recreate the browser session
+            
             # Common ticker symbols for well-known companies
             common_tickers = {
-                'apple': 'AAPL',
                 'microsoft': 'MSFT',
                 'amazon': 'AMZN',
                 'google': 'GOOGL',
@@ -851,10 +1134,38 @@ class CompanyScraper:
                 self.logger.warning(f"No ticker found for {company_name}, using company name as ticker")
                 ticker = company_name
             
-            # Try Yahoo Finance with the ticker
+            # Try multiple finance sources
+            # 1. Alpha Vantage API (free tier)
+            alpha_vantage_url = f"https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol={ticker}&apikey=demo"
+            self.logger.info(f"Trying Alpha Vantage API for {ticker}")
+            
+            try:
+                headers = {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+                }
+                response = requests.get(alpha_vantage_url, headers=headers, timeout=10)
+                if response.status_code == 200:
+                    av_data = response.json()
+                    if 'Global Quote' in av_data and av_data['Global Quote']:
+                        quote = av_data['Global Quote']
+                        if '05. price' in quote:
+                            data['stock_price'] = quote['05. price']
+                            self.logger.info(f"Found stock price via Alpha Vantage: {data['stock_price']}")
+                        if '08. previous close' in quote:
+                            data['previous_close'] = quote['08. previous close']
+                        if '09. change' in quote:
+                            data['change'] = quote['09. change']
+                        if '10. change percent' in quote:
+                            data['change_percent'] = quote['10. change percent']
+                        # If we got data, return it without trying other sources
+                        if 'stock_price' in data:
+                            return data
+            except Exception as av_error:
+                self.logger.warning(f"Alpha Vantage API failed: {av_error}")
+            
+            # 2. Try Yahoo Finance with the ticker as fallback
             search_url = f"https://finance.yahoo.com/quote/{ticker}"
             self.logger.info(f"Scraping financial data from: {search_url}")
-            
             if self.driver:
                 try:
                     self.driver.get(search_url)
@@ -877,8 +1188,19 @@ class CompanyScraper:
                                 try:
                                     price_element = soup.select_one('[data-field="regularMarketPrice"]')
                                     if price_element:
-                                        data['stock_price'] = price_element.get_text().strip()
-                                        self.logger.info(f"Found stock price via requests: {data['stock_price']}")
+                                        price_text = price_element.get_text().strip()
+                                        # Validate price data - should be a reasonable number
+                                        # Check if it's a valid price (not some error value like 5,630)
+                                        try:
+                                            # Remove commas and convert to float for validation
+                                            price_value = float(price_text.replace(',', ''))
+                                            if price_value > 0 and price_value < 100000:  # Reasonable price range
+                                                data['stock_price'] = price_text
+                                                self.logger.info(f"Found stock price via requests: {data['stock_price']}")
+                                            else:
+                                                self.logger.warning(f"Stock price out of reasonable range: {price_value}")
+                                        except ValueError:
+                                            self.logger.warning(f"Invalid price format: {price_text}")
                                 except Exception as price_e:
                                     self.logger.warning(f"Error getting stock price via requests: {price_e}")
                                 
@@ -917,6 +1239,29 @@ class CompanyScraper:
                             self.logger.info(f"Found stock price: {data['stock_price']}")
                     except Exception as e:
                         self.logger.warning(f"Error getting stock price: {e}")
+                        
+                        # Get leadership information
+                        leadership_keys = ['founder', 'ceo', 'key people', 'key person', 'chairman', 'president', 'directors']
+                        for key in leadership_keys:
+                            leader_row = infobox.find(lambda tag: tag.name == 'th' and key in tag.get_text().lower())
+                            if leader_row and leader_row.find_next('td'):
+                                leader_text = leader_row.find_next('td').get_text().strip()
+                                position = leader_row.get_text().strip()
+                                # Split if there are multiple people
+                                if ',' in leader_text or '\n' in leader_text:
+                                    leaders = [l.strip() for l in re.split('[,\\n]', leader_text) if l.strip()]
+                                    for leader in leaders:
+                                        data['leadership'].append({
+                                            'name': leader,
+                                            'position': position
+                                        })
+                                        self.logger.info(f"Found leader: {leader} ({position})")
+                                else:
+                                    data['leadership'].append({
+                                        'name': leader_text,
+                                        'position': position
+                                    })
+                                    self.logger.info(f"Found leader: {leader_text} ({position})")
                     
                     # Get market cap
                     try:
@@ -977,6 +1322,22 @@ class CompanyScraper:
                 result['financials'][key] = new_data[key]
                 result['sources'][key] = source
         
+        # Update leadership information
+        if 'leadership' in new_data and new_data['leadership']:
+            for leader in new_data['leadership']:
+                leader_copy = leader.copy()  # Create a copy to avoid modifying the original
+                leader_copy['source'] = source  # Add source information
+                result['leadership'].append(leader_copy)
+                self.logger.info(f"Added leadership information: {leader['name']}")
+        
+        # Update leadership information
+        if 'leadership' in new_data and new_data['leadership']:
+            for leader in new_data['leadership']:
+                leader_copy = leader.copy()  # Create a copy to avoid modifying the original
+                leader_copy['source'] = source  # Add source information
+                result['leadership'].append(leader_copy)
+                self.logger.info(f"Added leadership information: {leader['name']}")
+        
         # Update products
         if 'products' in new_data and new_data['products']:
             for product in new_data['products']:
@@ -984,12 +1345,11 @@ class CompanyScraper:
                     'name': product,
                     'source': source
                 })
-        
+
         # Store source URLs
         if 'source_url' in new_data:
             source_key = source.lower().replace(' ', '_')
             result['source_urls'][source_key] = new_data['source_url']
-
     def scrape_news(self, company_name):
         """Scrape news articles for a company using GoogleNews"""
         self.logger.info(f"Fetching news articles for: {company_name}")
@@ -1002,8 +1362,16 @@ class CompanyScraper:
             # Initialize GoogleNews
             googlenews = GoogleNews(lang='en', period='7d')
             googlenews.search(company_name)
-            news_results = googlenews.results()
             
+            # Handle potential None result from GoogleNews
+            try:
+                news_results = googlenews.results()
+                if news_results is None:
+                    news_results = []
+                    self.logger.warning("GoogleNews returned None results")
+            except Exception as results_error:
+                self.logger.warning(f"Error getting GoogleNews results: {results_error}")
+                news_results = []
             # Log the number of results found
             if news_results:
                 self.logger.info(f"Found {len(news_results)} news articles for {company_name}")
